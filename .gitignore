@@ -1,0 +1,30 @@
+# User specific & automatically generated files #
+#################################################
+.env
+*.log
+.rnd
+
+# IDE and editor specific files #
+#################################
+nbproject
+.idea
+.phpstorm.meta.php
+_ide_helper.php
+
+# OS generated files #
+######################
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Icon?
+ehthumbs.db
+Thumbs.db
+*.mo
+
+# Elastic Beanstalk Files #
+###########################
+.elasticbeanstalk/*
+!.elasticbeanstalk/*.cfg.yml
+!.elasticbeanstalk/*.global.yml
