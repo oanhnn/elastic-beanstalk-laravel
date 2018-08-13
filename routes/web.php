@@ -12,5 +12,13 @@
 */
 
 Route::get('/', function () {
-    return view('welcome');
+
+    $dbConnected = true;
+    try {
+        DB::connection()->getPdo();
+    } catch (\Exception $e) {
+        $dbConnected = false;
+    }
+
+    return view('welcome', compact('dbConnected'));
 });

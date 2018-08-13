@@ -82,6 +82,12 @@
                     Laravel
                 </div>
 
+                @if($dbConnected)
+                    <div class="m-b-md">DB Connection OK</div>
+                @else
+                    <div class="m-b-md">DB Connection Error</div>
+                @endif
+
                 <div class="links">
                     <a href="https://laravel.com/docs">Documentation</a>
                     <a href="https://laracasts.com">Laracasts</a>
