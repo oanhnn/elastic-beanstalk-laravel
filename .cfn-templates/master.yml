@@ -64,6 +64,11 @@ Parameters:
     AllowedPattern: ^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\/([0-9]|[1-2][0-9]|3[0-2]))$
     Default: 10.10.0.0/16
 
+  S3BucketName:
+    Description: The name of the S3 bucket for uploading files.
+    Type: String
+    Default: ''
+
   AppKeyName:
     Description: Optional key pair of the ec2-user to establish a SSH connection to the SSH bastion instance.
     Type: AWS::EC2::KeyPair::KeyName
@@ -72,6 +77,51 @@ Parameters:
     Description: Instance type of the SSH bastion instance.
     Type: String
     Default: t2.nano
+
+  DBSnapshot:
+    Description: The identifier for the DB cluster snapshot from which you want to restore (leave blank to create an empty cluster).
+    Type: String
+    Default: ''
+
+  DBInstanceType:
+    Description: The instance type of database server.
+    Type: String
+    AllowedValues:
+    - db.t2.small
+    - db.t2.medium
+    - db.t2.xlarge
+    - db.r4.large
+    - db.r4.xlarge
+    - db.r4.2xlarge
+    - db.r4.4xlarge
+    - db.r4.8xlarge
+    - db.r4.16xlarge
+    Default: db.t2.small
+
+  DBName:
+    Description: The name of the database (ignored when DBSnapshotIdentifier is set, value used from snapshot).
+    Type: String
+    Default: ''
+
+  DBUsername:
+    Description: The master user name for the DB instance (ignored when DBSnapshotIdentifier is set, value used from snapshot).
+    Type: String
+    Default: dbadmin
+
+  DBPassword:
+    Description: The master password for the DB instance (ignored when DBSnapshotIdentifier is set, value used from snapshot).
+    Type: String
+    NoEcho: true
+    Default: ''
+
+  AlertEmail:
+    Description: The email address that will receive alerts.
+    Type: String
+
+  AlertFallbackEmaill:
+    Description: The email address that will receive alerts if alerts can not be delivered.
+    Type: String
+    Default: ''
 
   LogsRetentionInDays:
     Description: Specifies the number of days you want to retain log events.
@@ -103,8 +153,24 @@ Metadata:
       - TemplateBucket
       - TemplateKey
       - VpcCidr
+      - S3BucketName
       - AppInstanceType
       - AppKeyName
+
+    - Label:
+        default: Database Parameters (MySQL)
+      Parameters:
+      - DBSnapshot
+      - DBInstanceType
+      - DBName
+      - DBUsername
+      - DBPassword
+
+    - Label:
+        default: Operations Parameters
+      Parameters:
+      - AlertEmail
+      - AlertFallbackEmaill
       - SSHFrom
       - LogsRetentionInDays
 
@@ -184,6 +250,17 @@ Mappings:
 
 Resources:
 
+  AlertStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${TemplateBucket}/${TemplateKey}/alert.cfn.yml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        BranchName: !Ref BranchName
+        Environment: !Ref Environment
+        Email: !Ref AlertEmail
+        FallbackEmail: !Ref AlertFallbackEmaill
+
   VpcStack:
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -193,6 +270,40 @@ Resources:
         BranchName: !Ref BranchName
         Environment: !Ref Environment
         VpcCidr: !Ref VpcCidr
+
+  S3BucketStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${TemplateBucket}/${TemplateKey}/s3-bucket.cfn.yml
+      Parameters:
+        BucketName: !Ref S3BucketName
+        Access: 'CloudFrontRead'
+        Versioning: 'false'
+        NoncurrentVersionExpirationInDays: '0'
+        Encryption: 'false'
+
+  S3EndpointStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${TemplateBucket}/${TemplateKey}/s3-endpoint.cfn.yml
+      Parameters:
+        ParentVPCStack: !GetAtt VpcStack.Outputs.StackName
+        ParentS3BucketStack: !GetAtt S3BucketStack.Outputs.StackName
+
+  DatabaseStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${TemplateBucket}/${TemplateKey}/aurora-mysql.cfn.yml
+      Parameters:
+        ParentVPCStack: !GetAtt VpcStack.Outputs.StackName
+        ParentAlertStack: !GetAtt AlertStack.Outputs.StackName
+        ProjectName: !Ref ProjectName
+        BranchName: !Ref BranchName
+        DBSnapshotIdentifier: !Ref DBSnapshot
+        DBInstanceClass: !Ref DBInstanceType
+        DBName: !Ref DBName
+        DBMasterUsername: !Ref  DBUsername
+        DBMasterUserPassword: !Ref DBPassword
 
   ServiceRole:
     Type: AWS::IAM::Role
@@ -313,6 +424,10 @@ Resources:
         Value: !Ref AppInstanceType
 
       - Namespace: 'aws:autoscaling:launchconfiguration'
+        OptionName: SecurityGroups
+        Value: !GetAtt VpcStack.Outputs.ClientSecurityGroup
+
+      - Namespace: 'aws:autoscaling:launchconfiguration'
         OptionName: SSHSourceRestriction
         Value: !Sub tcp,22,22,${SSHFrom}
 
@@ -381,10 +496,9 @@ Resources:
         Value: !Ref LogsRetentionInDays
 
       # SNS TOPIC OPTIONS
-      # - Namespace: 'aws:elasticbeanstalk:sns:topics'
-      #   OptionName: Notification Topic ARN
-      #   Value:
-      #     Fn::ImportValue: !Sub ${ParentAlertStack}-TopicARN
+      - Namespace: 'aws:elasticbeanstalk:sns:topics'
+        OptionName: Notification Topic ARN
+        Value: !GetAtt AlertStack.Outputs.TopicARN
 
       # PHP OPTIONS
       - Namespace: 'aws:elasticbeanstalk:container:php:phpini'
@@ -459,6 +573,48 @@ Resources:
       - Namespace: 'aws:elasticbeanstalk:application:environment'
         OptionName: AWS_VPC_IP
         Value: !GetAtt VpcStack.Outputs.VpcCidr
+
+      - Namespace: 'aws:elasticbeanstalk:application:environment'
+        OptionName: AWS_BUCKET
+        Value: !GetAtt S3BucketStack.Outputs.BucketName
+
+      - Namespace: 'aws:elasticbeanstalk:application:environment'
+        OptionName: AWS_URL
+        Value: !Sub
+        - https://${S3BucketDomainName}
+        - S3BucketDomainName: !GetAtt S3BucketStack.Outputs.BucketDomainName
+
+      - Namespace: 'aws:elasticbeanstalk:application:environment'
+        OptionName: FILESYSTEM_DRIVER
+        Value: 'S3'
+
+      - Namespace: 'aws:elasticbeanstalk:application:environment'
+        OptionName: DB_CONNECTION
+        Value: 'mysql'
+
+      - Namespace: 'aws:elasticbeanstalk:application:environment'
+        OptionName: DB_HOST
+        Value: !GetAtt DatabaseStack.Outputs.DNSName
+
+      - Namespace: 'aws:elasticbeanstalk:application:environment'
+        OptionName: DB_READ_HOST
+        Value: !GetAtt DatabaseStack.Outputs.ReadDNSName
+
+      - Namespace: 'aws:elasticbeanstalk:application:environment'
+        OptionName: DB_PORT
+        Value: '3306'
+
+      - Namespace: 'aws:elasticbeanstalk:application:environment'
+        OptionName: DB_DATABASE
+        Value: !Ref DBName
+
+      - Namespace: 'aws:elasticbeanstalk:application:environment'
+        OptionName: DB_USERNAME
+        Value: !Ref DBUsername
+
+      - Namespace: 'aws:elasticbeanstalk:application:environment'
+        OptionName: DB_PASSWORD
+        Value: !Ref DBPassword
 
 Outputs:
 

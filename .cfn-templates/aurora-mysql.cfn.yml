@@ -1,0 +1,389 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Create a RDS Aurora
+
+Parameters:
+
+  ParentAlertStack:
+    Description: The stack name of parent alert stack based on alert.cfn.yml template.
+    Type: String
+    MaxLength: 255
+    Default: ''
+
+  ParentVPCStack:
+    Description: The stack name of parent VPC stack based on vpc.cfn.yml template.
+    Type: String
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: ^[a-zA-Z][-a-zA-Z0-9]*$
+
+  ProjectName:
+    Description: The name of project. It is used as project tag value for all resources.
+    Type: String
+    MaxLength: 30
+    MinLength: 1
+    AllowedPattern: ^[A-Za-z0-9]*$
+    ConstraintDescription: Must contain only alphanumeric characters and numbers.
+
+  BranchName:
+    Description: The name of branch. It is used as branch tag value for all resources.
+    Type: String
+    MaxLength: 30
+    MinLength: 1
+    AllowedPattern: ^[A-Za-z0-9]*$
+    ConstraintDescription: Must contain only alphanumeric characters and numbers.
+
+  DBSnapshotIdentifier:
+    Description: Optional identifier for the DB cluster snapshot from which you want to restore (leave blank to create an empty cluster).
+    Type: String
+    Default: ''
+
+  DBInstanceClass:
+    Description: The instance type of database server.
+    Type: String
+    AllowedValues:
+    - db.t2.small
+    - db.t2.medium
+    - db.t2.xlarge
+    - db.r4.large
+    - db.r4.xlarge
+    - db.r4.2xlarge
+    - db.r4.4xlarge
+    - db.r4.8xlarge
+    - db.r4.16xlarge
+    Default: db.t2.small
+
+  DBName:
+    Description: Name of the database (ignored when DBSnapshotIdentifier is set, value used from snapshot).
+    Type: String
+    Default: ''
+
+  DBMasterUsername:
+    Description: The master user name for the DB instance (ignored when DBSnapshotIdentifier is set, value used from snapshot).
+    Type: String
+    Default: master
+
+  DBMasterUserPassword:
+    Description: The master password for the DB instance (ignored when DBSnapshotIdentifier is set, value used from snapshot).
+    Type: String
+    NoEcho: true
+    Default: ''
+
+  DBBackupRetentionPeriod:
+    Description: The number of days to keep snapshots of the database.
+    Type: Number
+    Default: 30
+
+  Encryption:
+    Description: Enable server side encryption using KMS (customer managed) CMK (ignored when DBSnapshotIdentifier is set, value used from snapshot).
+    Type: String
+    Default: false
+    AllowedValues: [true, false]
+
+Conditions:
+
+  HasAlertTopic: !Not [!Equals [!Ref ParentAlertStack, '']]
+  HasDBSnapshotIdentifier: !Not [!Equals [!Ref DBSnapshotIdentifier, '']]
+  HasEncryption: !Equals [!Ref Encryption, true]
+  HasEncryptionAndNotDBSnapshotIdentifier: !And [!Condition HasEncryption, !Not [!Condition HasDBSnapshotIdentifier]]
+
+Resources:
+
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable MySQL ingress from Application install
+      VpcId:
+        Fn::ImportValue: !Sub ${ParentVPCStack}-VpcId
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 3306
+        ToPort: 3306
+        SourceSecurityGroupId:
+          Fn::ImportValue: !Sub ${ParentVPCStack}-ClientSecurityGroup
+      Tags:
+      - Key: Name
+        Value: !Sub ${ProjectName}-DBSecurityGroup
+      - Key: Project
+        Value: !Ref ProjectName
+      - Key: Branch
+        Value: !Ref BranchName
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Database subnet group
+      SubnetIds:
+        Fn::Split:
+        - ','
+        - Fn::ImportValue: !Sub ${ParentVPCStack}-PrivateSubnets
+      Tags:
+      - Key: Name
+        Value: !Sub ${ProjectName}-DBSubnetGroup
+      - Key: Project
+        Value: !Ref ProjectName
+      - Key: Branch
+        Value: !Ref BranchName
+
+  DBKey:
+    Condition: HasEncryptionAndNotDBSnapshotIdentifier
+    Type: AWS::KMS::Key
+    Properties:
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+          Action: 'kms:*'
+          Resource: '*'
+        - Effect: Allow
+          Principal:
+            AWS: '*'
+          Action:
+          - 'kms:Encrypt'
+          - 'kms:Decrypt'
+          - 'kms:ReEncrypt*'
+          - 'kms:GenerateDataKey*'
+          - 'kms:CreateGrant'
+          - 'kms:ListGrants'
+          - 'kms:DescribeKey'
+          Resource: '*'
+          Condition:
+            StringEquals:
+              'kms:CallerAccount': !Ref 'AWS::AccountId'
+              'kms:ViaService': !Sub 'rds.${AWS::Region}.amazonaws.com'
+
+  DBKeyAlias:
+    Condition: HasEncryptionAndNotDBSnapshotIdentifier
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${AWS::StackName}'
+      TargetKeyId: !Ref DBKey
+
+  DBClusterParameterGroup:
+    Type: AWS::RDS::DBClusterParameterGroup
+    Properties:
+      Description: !Sub 'DBClusterParameterGroup for ${ProjectName}'
+      Family: 'aurora-mysql5.7'
+      Parameters:
+        character_set_client: utf8
+        character_set_database: utf8
+        character_set_filesystem: utf8
+        character_set_server: utf8
+        collation_server: utf8_general_ci
+
+  DBParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: !Sub 'DBParameterGroup for ${ProjectName}'
+      Family: 'aurora-mysql5.7'
+      Parameters:
+        innodb_lock_wait_timeout: '10'
+        log_output: FILE
+        tx_isolation: READ-COMMITTED
+
+  DBCluster:
+    Type: AWS::RDS::DBCluster
+    Properties:
+      AvailabilityZones:
+      - !Select [0, !GetAZs '']
+      - !Select [1, !GetAZs '']
+      BackupRetentionPeriod: !Ref DBBackupRetentionPeriod
+      DatabaseName: !If [HasDBSnapshotIdentifier, !Ref 'AWS::NoValue', !Ref DBName]
+      DBClusterParameterGroupName: !Ref DBClusterParameterGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      Engine: 'aurora-mysql'
+      EngineVersion: '5.7.12'
+      Port: 3306
+      KmsKeyId: !If [HasEncryptionAndNotDBSnapshotIdentifier, !Ref DBKey, !Ref 'AWS::NoValue']
+      MasterUsername: !If [HasDBSnapshotIdentifier, !Ref 'AWS::NoValue', !Ref DBMasterUsername]
+      MasterUserPassword: !If [HasDBSnapshotIdentifier, !Ref 'AWS::NoValue', !Ref DBMasterUserPassword]
+      PreferredBackupWindow: '18:24-18:54'
+      PreferredMaintenanceWindow: 'tue:19:00-tue:19:30'
+      SnapshotIdentifier: !If [HasDBSnapshotIdentifier, !Ref DBSnapshotIdentifier, !Ref 'AWS::NoValue']
+      StorageEncrypted: !If [HasDBSnapshotIdentifier, !Ref 'AWS::NoValue', !Ref Encryption]
+      VpcSecurityGroupIds:
+      - !Ref DBSecurityGroup
+
+  DBInstanceA:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AllowMajorVersionUpgrade: false
+      AutoMinorVersionUpgrade: true
+      CopyTagsToSnapshot: true
+      DBClusterIdentifier: !Ref DBCluster
+      DBInstanceClass: !Ref DBInstanceClass
+      DBParameterGroupName: !Ref DBParameterGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      Engine: 'aurora-mysql'
+
+  DBInstanceB:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AllowMajorVersionUpgrade: false
+      AutoMinorVersionUpgrade: true
+      CopyTagsToSnapshot: true
+      DBClusterIdentifier: !Ref DBCluster
+      DBInstanceClass: !Ref DBInstanceClass
+      DBParameterGroupName: !Ref DBParameterGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      Engine: 'aurora-mysql'
+
+  DatabaseACPUUtilizationTooHighAlarm:
+    Condition: HasAlertTopic
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+      - Fn::ImportValue: !Sub ${ParentAlertStack}-TopicARN
+      AlarmDescription: Average database CPU utilization over last 10 minutes too high.
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+      - Name: DBInstanceIdentifier
+        Value: !Ref DBInstanceA
+      EvaluationPeriods: 1
+      MetricName: CPUUtilization
+      Namespace: AWS/RDS
+      OKActions:
+      - Fn::ImportValue: !Sub ${ParentAlertStack}-TopicARN
+      Period: 600
+      Statistic: Average
+      Threshold: 80
+
+  DatabaseBCPUUtilizationTooHighAlarm:
+    Condition: HasAlertTopic
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+      - Fn::ImportValue: !Sub ${ParentAlertStack}-TopicARN
+      AlarmDescription: Average database CPU utilization over last 10 minutes too high.
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+      - Name: DBInstanceIdentifier
+        Value: !Ref DBInstanceB
+      EvaluationPeriods: 1
+      MetricName: CPUUtilization
+      Namespace: AWS/RDS
+      OKActions:
+      - Fn::ImportValue: !Sub ${ParentAlertStack}-TopicARN
+      Period: 600
+      Statistic: Average
+      Threshold: 80
+
+  DatabaseACPUCreditBalanceTooLowAlarm:
+    Condition: HasAlertTopic
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+      - Fn::ImportValue: !Sub ${ParentAlertStack}-TopicARN
+      AlarmDescription: Average database CPU credit balance over last 10 minutes too low, expect a significant performance drop soon.
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+      - Name: DBInstanceIdentifier
+        Value: !Ref DBInstanceA
+      EvaluationPeriods: 1
+      MetricName: CPUCreditBalance
+      Namespace: AWS/RDS
+      OKActions:
+      - Fn::ImportValue: !Sub ${ParentAlertStack}-TopicARN
+      Period: 600
+      Statistic: Average
+      Threshold: 20
+
+  DatabaseBCPUCreditBalanceTooLowAlarm:
+    Condition: HasAlertTopic
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+      - Fn::ImportValue: !Sub ${ParentAlertStack}-TopicARN
+      AlarmDescription: Average database CPU credit balance over last 10 minutes too low, expect a significant performance drop soon.
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+      - Name: DBInstanceIdentifier
+        Value: !Ref DBInstanceB
+      EvaluationPeriods: 1
+      MetricName: CPUCreditBalance
+      Namespace: AWS/RDS
+      OKActions:
+      - Fn::ImportValue: !Sub ${ParentAlertStack}-TopicARN
+      Period: 600
+      Statistic: Average
+      Threshold: 20
+
+  DatabaseAFreeableMemoryTooLowAlarm:
+    Condition: HasAlertTopic
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+      - Fn::ImportValue: !Sub ${ParentAlertStack}-TopicARN
+      AlarmDescription: Average database freeable memory over last 10 minutes too low, performance may suffer.
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+      - Name: DBInstanceIdentifier
+        Value: !Ref DBInstanceA
+      EvaluationPeriods: 1
+      MetricName: FreeableMemory
+      Namespace: AWS/RDS
+      OKActions:
+      - Fn::ImportValue: !Sub ${ParentAlertStack}-TopicARN
+      Period: 600
+      Statistic: Average
+      Threshold: 64000000 # 64 Megabyte in Byte
+
+  DatabaseBFreeableMemoryTooLowAlarm:
+    Condition: HasAlertTopic
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+      - Fn::ImportValue: !Sub ${ParentAlertStack}-TopicARN
+      AlarmDescription: Average database freeable memory over last 10 minutes too low, performance may suffer.
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+      - Name: DBInstanceIdentifier
+        Value: !Ref DBInstanceB
+      EvaluationPeriods: 1
+      MetricName: FreeableMemory
+      Namespace: AWS/RDS
+      OKActions:
+      - Fn::ImportValue: !Sub ${ParentAlertStack}-TopicARN
+      Period: 600
+      Statistic: Average
+      Threshold: 64000000 # 64 Megabyte in Byte
+
+  DatabaseClusterEventSubscription:
+    Condition: HasAlertTopic
+    Type: AWS::RDS::EventSubscription
+    Properties:
+      EventCategories:
+      - failover
+      - failure
+      - notification
+      SnsTopicArn:
+        Fn::ImportValue: !Sub ${ParentAlertStack}-TopicARN
+      SourceIds:
+      - !Ref DBCluster
+      SourceType: db-cluster
+
+Outputs:
+
+  StackName:
+    Description: Stack name
+    Value: !Sub ${AWS::StackName}
+
+  ClusterName:
+    Description: The name of the cluster
+    Value: !Ref DBCluster
+    Export:
+      Name: !Sub ${AWS::StackName}-ClusterName
+
+  DNSName:
+    Description: The DNS address of the DB cluster
+    Value: !GetAtt DBCluster.Endpoint.Address
+    Export:
+      Name: !Sub ${AWS::StackName}-DNSName
+
+  ReadDNSName:
+    Description: The DNS address of the readonly DB cluster
+    Value: !GetAtt DBCluster.ReadEndpoint.Address
+    Export:
+      Name: !Sub ${AWS::StackName}-ReadDNSName

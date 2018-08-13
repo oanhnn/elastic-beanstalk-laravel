@@ -1,0 +1,69 @@
+---
+# This template describes a VPC endpoint to securely route traffic within a VPC for private instances to access S3
+# without the need of a NAT Gateway, NAT instance, or public internet.
+#
+# See: https://docs.aws.amazon.com/AmazonVPC/latest/UserGuide/vpc-endpoints.html
+#
+# By default, access to all S3 actions and buckets is allowed, but may be constrained with a policy document.
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Create a VPC endpoint to S3
+
+Parameters:
+
+  ParentVPCStack:
+    Description: The stack name of parent VPC stack based on vpc.cfn.yml template.
+    Type: String
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: ^[a-zA-Z][-a-zA-Z0-9]*$
+
+  ParentS3BucketStack:
+    Description: The stack name of parent s3 bucket stack based on alert.cfn.yml template.
+    Type: String
+    MaxLength: 255
+    Default: ''
+
+Conditions:
+
+  HasS3BucketStack: !Not [ !Equals [ !Ref ParentS3BucketStack, '' ]]
+
+Resources:
+
+  EndpointS3:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId:
+        Fn::ImportValue: !Sub ${ParentVPCStack}-VpcId
+      RouteTableIds:
+        Fn::Split:
+        - ','
+        - Fn::ImportValue: !Sub '${ParentVPCStack}-PrivateRouteTables'
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action:
+              - 's3:*'
+            Resource:
+              - !Sub
+                - 'arn:aws:s3:::${BucketName}/*'
+                - BucketName:
+                    Fn::If:
+                    - HasS3BucketStack
+                    - Fn::ImportValue: !Sub '${ParentS3BucketStack}-BucketName'
+                    - '*'
+
+Outputs:
+
+  StackName:
+    Description: Stack name
+    Value: !Sub ${AWS::StackName}
+
+  Endpoint:
+    Description: The VPC endpoint to S3
+    Value: !Ref EndpointS3
+    Export:
+      Name: !Sub ${AWS::StackName}-Endpoint

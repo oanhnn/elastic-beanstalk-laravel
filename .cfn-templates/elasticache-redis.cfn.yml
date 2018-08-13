@@ -1,0 +1,195 @@
+---
+# This template describes an AWS ElastiCache Cluster with Redis Engine based on parameters,
+# along with an associated security group and subnet group.
+# See links:
+#   https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/supported-engine-versions.html
+#   https://docs.aws.amazon.com/AmazonElastiCache/latest/red-ug/WhatIs.Components.html
+#
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Create an ElastiCache Cluster with Redis Engine'
+
+Parameters:
+
+  ParentVPCStack:
+    Description: Stack name of parent VPC stack based on vpc.cfn.yml template.
+    Type: String
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: ^[a-zA-Z][-a-zA-Z0-9]*$
+
+  ParentBastionStack:
+    Description: Optional but recommended stack name of parent SSH bastion instance stack based on bastion.cfn.yml template.
+    Type: String
+    MaxLength: 255
+    Default: ''
+
+  ParentAlertStack:
+    Description: Optional but recommended stack name of parent alert stack based on alert.cfn.yml template.
+    Type: String
+    MaxLength: 255
+    Default: ''
+
+  ProjectName:
+    Description: This parameter is used as project tag value for all resources.
+    Type: String
+    MaxLength: 30
+    MinLength: 1
+    AllowedPattern: ^[A-Za-z0-9]*$
+    ConstraintDescription: This parameter must contain only alphanumeric characters and numbers.
+
+  BranchName:
+    Description: This parameter is used as branch tag value for all resources.
+    Type: String
+    MaxLength: 30
+    MinLength: 1
+    AllowedPattern: ^[A-Za-z0-9]*$
+    ConstraintDescription: This parameter must contain only alphanumeric characters and numbers.
+
+  # See https://docs.aws.amazon.com/AmazonElastiCache/latest/UserGuide/CacheNodes.SelectSize.html
+  CacheNodeType:
+    Description: Cache node instance class, e.g. cache.t2.micro (free tier)
+    Type: String
+    AllowedValues:
+      - cache.t2.micro
+      - cache.t2.small
+      - cache.t2.medium
+      - cache.m4.large
+      - cache.m4.xlarge
+      - cache.m4.2xlarge
+      - cache.m4.4xlarge
+      - cache.m4.10xlarge
+      - cache.r4.large
+      - cache.r4.xlarge
+      - cache.r4.2xlarge
+      - cache.r4.4xlarge
+      - cache.r4.8xlarge
+      - cache.r4.16xlarge
+    Default: cache.t2.micro
+    ConstraintDescription: Node instance class not supported.
+
+  NumCacheNodes:
+    Description: The number of cache nodes.
+    Type: Number
+    MinValue: 1
+    MaxValue: 5
+    Default: 2
+    ConstraintDescription: The number of nodes on group must be between 1 and 5.
+
+  AutoMinorVersionUpgrade:
+    Description: Whether or not minor version upgrades to the cache engine should be applied automatically during the maintenance window.
+    Type: String
+    AllowedValues: [true, false]
+    Default: true
+
+Conditions:
+
+  HasBastionStack: !Not [ !Equals [ !Ref ParentBastionStack, '' ]]
+  HasAlertTopic: !Not [ !Equals [!Ref ParentAlertStack, '' ]]
+  IsAutomaticFailoverSupported:
+    Fn::And:
+    - !Not [ !Equals [ !Select [ 1, !Split ['.', !Ref CacheNodeType ] ], 't1']]
+    - !Not [ !Equals [ !Select [ 1, !Split ['.', !Ref CacheNodeType ] ], 't2']]
+  IsAutomaticFailoverEnabled:
+    Fn::And:
+    - !Condition IsAutomaticFailoverSupported
+    - !Not [ !Equals [!Ref NumCacheNodes, 1 ]]
+
+Resources:
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ElastiCache Security Group
+      VpcId:
+        Fn::ImportValue: !Sub ${ParentVPCStack}-VpcId
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        ToPort: 6379
+        FromPort: 6379
+        SourceSecurityGroupId:
+          Fn::ImportValue: !Sub ${ParentVPCStack}-ClientSecurityGroup
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-SecurityGroup
+      - Key: Project
+        Value: !Ref ProjectName
+      - Key: Branch
+        Value: !Ref BranchName
+
+  BastionToSecurityGroupIngress:
+    Condition: HasBastionStack
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SecurityGroup
+      IpProtocol: tcp
+      ToPort: 6379
+      FromPort: 6379
+      SourceSecurityGroupId:
+        Fn::ImportValue: !Sub ${ParentBastionStack}-SecurityGroup
+
+  SubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: Cache Subnet Group
+      SubnetIds:
+        Fn::Split:
+        - ','
+        - Fn::ImportValue: !Sub ${ParentVPCStack}-PrivateSubnets
+
+  CacheParameterGroup:
+    Type: AWS::ElastiCache::ParameterGroup
+    Properties:
+      Description: Cache Parameter Group
+      CacheParameterGroupFamily: 'redis3.2'
+      Properties: {}
+
+  ReplicationGroup:
+    Type: AWS::ElastiCache::ReplicationGroup
+    Properties:
+      ReplicationGroupDescription: A redis replication group
+      AtRestEncryptionEnabled: false
+      TransitEncryptionEnabled: false
+      AutomaticFailoverEnabled: !If [IsAutomaticFailoverEnabled, true, false]
+      AutoMinorVersionUpgrade: !Ref AutoMinorVersionUpgrade
+      CacheNodeType: !Ref CacheNodeType
+      CacheSubnetGroupName: !Ref SubnetGroup
+      CacheParameterGroupName: 'default.redis3.2'
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      NotificationTopicArn:
+        Fn::If:
+        - HasAlertTopic
+        - Fn::ImportValue: !Sub ${ParentAlertStack}-TopicARN
+        - !Ref 'AWS::NoValue'
+      Engine: redis
+      EngineVersion: '3.2.10'
+      Port: 6379
+      NumCacheClusters: !Ref NumCacheNodes
+      PreferredMaintenanceWindow: 'wed:19:11-wed:20:41'
+      # SnapshotRetentionLimit: 5
+      # SnapshotWindow: '18:24-18:54'
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-ReplicationGroup
+      - Key: Project
+        Value: !Ref ProjectName
+      - Key: Branch
+        Value: !Ref BranchName
+
+Outputs:
+
+  StackName:
+    Description: Stack Name
+    Value: !Sub ${AWS::StackName}
+
+  ReplicationGroupId:
+    Description: The replication group ID
+    Value: !Ref ReplicationGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-ReplicationGroup
+
+  DNSName:
+    Description: The DNS address of the primary read-write cache node.
+    Value: !GetAtt ReplicationGroup.PrimaryEndPoint.Address
+    Export:
+      Name: !Sub ${AWS::StackName}-DNSName

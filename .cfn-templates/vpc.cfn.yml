@@ -411,6 +411,20 @@ Resources:
       SubnetId: !Ref PrivateSubnet2
       NetworkAclId: !Ref PrivateNetworkAcl
 
+  # SecurityGroup resources
+  ClientSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Client security group
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: !Sub ${ProjectName}-ClientSecurityGroup
+      - Key: Project
+        Value: !Ref ProjectName
+      - Key: Branch
+        Value: !Ref BranchName
+
 Outputs:
 
   StackName:
@@ -456,3 +470,9 @@ Outputs:
       - !Join [',', [!Ref NatRouteTable1]]
     Export:
       Name: !Sub ${AWS::StackName}-PrivateRouteTables
+
+  ClientSecurityGroup:
+    Description: Client security group
+    Value: !Ref ClientSecurityGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-ClientSecurityGroup

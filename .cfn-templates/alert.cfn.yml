@@ -1,0 +1,170 @@
+---
+# This template describes a SNS topic that can be used by many other templates to receive alerts.
+# You can add one or multiple subscribers to this topic and they will all receive the same alerts.
+# Supported transports are: Email HTTP endpoint * HTTPS endpoint
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Create alert topic
+
+Parameters:
+  ProjectName:
+    Description: The name of project. It is used as project tag value for all resources.
+    Type: String
+    MaxLength: 30
+    MinLength: 1
+    AllowedPattern: ^[A-Za-z0-9]*$
+    ConstraintDescription: Must contain only alphanumeric characters and numbers.
+
+  BranchName:
+    Description: The name of branch. It is used as branch tag value for all resources.
+    Type: String
+    MaxLength: 30
+    MinLength: 1
+    AllowedPattern: ^[A-Za-z0-9]*$
+    ConstraintDescription: Must contain only alphanumeric characters and numbers.
+
+  Environment:
+    Description: The environment to deploy. Use staging for limited resources and no alerts.
+    Type: String
+    AllowedValues:
+    - Staging
+    - Production
+    Default: Staging
+
+  Email:
+    Description: The email address that will receive alerts.
+    Type: String
+    Default: ''
+
+  HttpEndpoint:
+    Description: The HTTP endpoint that will receive alerts via POST requests.
+    Type: String
+    Default: ''
+
+  HttpsEndpoint:
+    Description: The HTTPS endpoint that will receive alerts via POST requests.
+    Type: String
+    Default: ''
+
+  FallbackEmail:
+    Description: The email address that will receive alerts if alerts can not be delivered.
+    Type: String
+    Default: ''
+
+Conditions:
+
+  HasEmail: !Not [!Equals [!Ref Email, '']]
+  HasHttpEndpoint: !Not [!Equals [!Ref HttpEndpoint, '']]
+  HasHttpsEndpoint: !Not [!Equals [!Ref HttpsEndpoint, '']]
+  HasFallbackEmail: !Not [!Equals [!Ref FallbackEmail, '']]
+
+Resources:
+
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: !Sub ${ProjectName}-${BranchName}-${Environment}-AlertTopic
+
+  FallbackTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: !Sub ${ProjectName}-${BranchName}-${Environment}-FallbackTopic
+
+  TopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Id: Id1'
+        Version: '2012-10-17'
+        Statement:
+        - Sid: Sid1
+          Effect: Allow
+          Principal:
+            Service:
+            - 'events.amazonaws.com'           # Allow CloudWatch Events
+            - 'budgets.amazonaws.com'          # Allow Budget Notifications
+            - 'rds.amazonaws.com'              # Allow RDS Events
+            - 's3.amazonaws.com'               # Allow S3 Event Notifications
+          Action: sns:Publish
+          Resource: !Ref AlertTopic
+        - Sid: Sid2
+          Effect: Allow
+          Principal:
+            AWS: '*' # Allow CloudWatch Alarms, ElastiCache Notifications, Elastic Beanstalk Notifications, Auto Scaling Notification
+          Action: sns:Publish
+          Resource: !Ref AlertTopic
+          Condition:
+            StringEquals:
+              'AWS:SourceOwner': !Ref 'AWS::AccountId'
+        - Sid: Sid3
+          Effect: Allow
+          Principal:
+            Service: 'ses.amazonaws.com'        # Allow SES Notifications & Events
+          Action: sns:Publish
+          Resource: !Ref AlertTopic
+          Condition:
+            StringEquals:
+              'AWS:Referer': !Ref 'AWS::AccountId'
+      Topics:
+      - !Ref AlertTopic
+
+  NumberOfNotificationsFailedTooHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Alerts could not be delivered
+      Namespace: AWS/SNS
+      MetricName: NumberOfNotificationsFailed
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: 0
+      AlarmActions:
+      - !Ref FallbackTopic
+      Dimensions:
+      - Name: TopicName
+        Value: !GetAtt AlertTopic.TopicName
+
+  EmailSubscription:
+    Condition: HasEmail
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: !Ref Email
+      Protocol: email
+      TopicArn: !Ref AlertTopic
+
+  HttpEndpointSubscription:
+    Condition: HasHttpEndpoint
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: !Ref HttpEndpoint
+      Protocol: http
+      TopicArn: !Ref AlertTopic
+
+  HttpsEndpointSubscription:
+    Condition: HasHttpsEndpoint
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: !Ref HttpsEndpoint
+      Protocol: https
+      TopicArn: !Ref AlertTopic
+
+  FallbackEmailSubscription:
+    Condition: HasFallbackEmail
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: !Ref FallbackEmail
+      Protocol: email
+      TopicArn: !Ref FallbackTopic
+
+Outputs:
+
+  StackName:
+    Description: Stack name
+    Value: !Sub ${AWS::StackName}
+
+  TopicARN:
+    Description: The ARN of the alert topic
+    Value: !Ref AlertTopic
+    Export:
+      Name: !Sub ${AWS::StackName}-TopicARN
