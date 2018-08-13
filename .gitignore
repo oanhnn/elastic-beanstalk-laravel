@@ -1,5 +1,19 @@
 # User specific & automatically generated files #
 #################################################
+/node_modules
+/public/css
+/public/js
+/public/hot
+/public/storage
+/public/mix-manifest.json
+/storage/*.key
+/vendor
+/.vagrant
+Homestead.json
+Homestead.yaml
+phpunit.xml
+phpcs.xml
+yarn.lock
 .env
 *.log
 .rnd
